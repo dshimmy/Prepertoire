@@ -1,0 +1,6 @@
+python-chess>=1.9.0
+requests>=2.31.0
+# stockfish binary is required separately for engine features:
+# macOS: brew install stockfish
+# Linux: apt install stockfish
+# or place binary at data/stockfish/stockfish
