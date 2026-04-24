@@ -200,12 +200,23 @@ def get_stats(repertoire: str, db_path: Path = DB_PATH) -> dict[str, Any]:
             "SELECT COUNT(*) FROM moves WHERE repertoire = ? AND is_my_move = 1", (repertoire,)
         ).fetchone()[0]
         gap_count = len(find_coverage_gaps(repertoire, db_path))
+        label_rows = conn.execute(
+            "SELECT prep_status, COUNT(*) AS cnt FROM moves "
+            "WHERE repertoire = ? AND is_my_move = 1 GROUP BY prep_status",
+            (repertoire,),
+        ).fetchall()
+        labels: dict[str | None, int] = {r["prep_status"]: r["cnt"] for r in label_rows}
         return {
             "total_games": total_games,
             "total_positions": total_positions,
             "total_moves": total_moves,
             "my_moves": my_moves,
             "coverage_gaps": gap_count,
+            "label_green": labels.get("green", 0),
+            "label_yellow": labels.get("yellow", 0),
+            "label_red": labels.get("red", 0),
+            "label_blue": labels.get("blue", 0),
+            "label_none": labels.get(None, 0),
         }
     finally:
         conn.close()

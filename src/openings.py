@@ -355,48 +355,36 @@ def _build_name_to_fen() -> None:
 _build_name_to_fen()
 
 
-def _count_my_moves_in_subtree(conn, fen: str, repertoire: str) -> int:
-    row = conn.execute(
+# (green, yellow, red, blue, unlabeled)
+LabelCounts = tuple[int, int, int, int, int]
+
+
+def _count_moves_by_label(conn, fen: str, repertoire: str) -> LabelCounts:
+    rows = conn.execute(
         """
         WITH RECURSIVE subtree(pos_id) AS (
             SELECT id FROM positions WHERE fen = ?
-            UNION ALL
+            UNION
             SELECT m.to_position_id
             FROM moves m JOIN subtree s ON m.from_position_id = s.pos_id
             WHERE m.repertoire = ?
         )
-        SELECT COUNT(*) FROM moves m2
+        SELECT prep_status, COUNT(*) AS cnt
+        FROM moves m2
         JOIN subtree s ON m2.from_position_id = s.pos_id
         WHERE m2.repertoire = ? AND m2.is_my_move = 1
+        GROUP BY prep_status
         """,
         (fen, repertoire, repertoire),
-    ).fetchone()
-    return row[0] if row else 0
-
-
-def get_openings_with_counts(repertoire: str, db_path) -> list[tuple[str, int]]:
-    """Return (opening_name, my_move_count) for openings present in the repertoire DB."""
-    from db import get_connection
-
-    conn = get_connection(db_path)
-    try:
-        fen_rows = conn.execute(
-            "SELECT DISTINCT p.fen FROM positions p "
-            "JOIN moves m ON p.id = m.from_position_id WHERE m.repertoire = ?",
-            (repertoire,),
-        ).fetchall()
-        fen_set = {r["fen"] for r in fen_rows}
-
-        results = []
-        for name, fen in _NAME_TO_FEN.items():
-            if fen not in fen_set:
-                continue
-            count = _count_my_moves_in_subtree(conn, fen, repertoire)
-            if count > 0:
-                results.append((name, count))
-        return sorted(results, key=lambda x: x[0])
-    finally:
-        conn.close()
+    ).fetchall()
+    counts: dict[str | None, int] = {r["prep_status"]: r["cnt"] for r in rows}
+    return (
+        counts.get("green", 0),
+        counts.get("yellow", 0),
+        counts.get("red", 0),
+        counts.get("blue", 0),
+        counts.get(None, 0),
+    )
 
 
 _START_FEN = normalize_fen(chess.Board())
@@ -404,12 +392,13 @@ _START_FEN = normalize_fen(chess.Board())
 
 def get_openings_split(
     repertoire: str, db_path
-) -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
-    """Return (main_openings, alt_openings) each as sorted (name, count) lists.
+) -> tuple[list[tuple[str, LabelCounts]], list[tuple[str, LabelCounts]]]:
+    """Return (main_openings, alt_openings) each as sorted (name, label_counts) lists.
 
     Main: reachable from the starting position without passing through a
           blue-labeled (alternative) my-move.
     Alt:  only reachable via at least one blue-labeled my-move.
+    label_counts is (green, yellow, red, blue, unlabeled).
     """
     from db import get_connection
 
@@ -440,15 +429,15 @@ def get_openings_split(
         ).fetchall()
         fen_set = {r["fen"] for r in fen_rows}
 
-        main: list[tuple[str, int]] = []
-        alt: list[tuple[str, int]] = []
+        main: list[tuple[str, LabelCounts]] = []
+        alt: list[tuple[str, LabelCounts]] = []
         for name, fen in _NAME_TO_FEN.items():
             if fen not in fen_set:
                 continue
-            count = _count_my_moves_in_subtree(conn, fen, repertoire)
-            if count == 0:
+            lc = _count_moves_by_label(conn, fen, repertoire)
+            if sum(lc) == 0:
                 continue
-            (main if fen in non_alt_fens else alt).append((name, count))
+            (main if fen in non_alt_fens else alt).append((name, lc))
 
         return sorted(main, key=lambda x: x[0]), sorted(alt, key=lambda x: x[0])
     finally:

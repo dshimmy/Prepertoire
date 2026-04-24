@@ -1,5 +1,6 @@
 python-chess>=1.9.0
 requests>=2.31.0
+cairosvg>=2.7.0
 # stockfish binary is required separately for engine features:
 # macOS: brew install stockfish
 # Linux: apt install stockfish

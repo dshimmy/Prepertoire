@@ -66,6 +66,8 @@ class RepertoireGUI:
         # Drill opening filter: repertoire -> set of opening names; FENs computed on apply
         self._drill_filter: dict[str, set[str]] = {}
         self._drill_filter_fens: dict[str, set[str]] = {}
+        self._last_completed_line: list[chess.Move] = []
+        self._drill_replay_line: list[chess.Move] | None = None
         # Cached result of get_openings_split for both colors; refreshed in background
         self._openings_split_cache: dict[str, tuple[list, list]] | None = None
 
@@ -335,6 +337,8 @@ class RepertoireGUI:
         bottom = tk.Frame(dr)
         bottom.pack(fill=tk.X)
         tk.Button(bottom, text="New Game", command=self._drill_new_game,
+                  font=("Arial", 9), width=10).pack(side=tk.LEFT, padx=2)
+        tk.Button(bottom, text="Drill Again", command=self._drill_again,
                   font=("Arial", 9), width=10).pack(side=tk.LEFT, padx=2)
         tk.Button(bottom, text="End Drill", command=self._end_drill,
                   font=("Arial", 9), width=10).pack(side=tk.RIGHT, padx=2)
@@ -885,6 +889,7 @@ class RepertoireGUI:
         self._drill_prep_status = None
         self._drill_main_vs_alt = False
         self._drill_hint_sqs = set()
+        self._drill_replay_line = None
         self._drill_book_lbl.config(text="Play book move", bg="#2a6e2a")
         self._drill_update_lbl.pack(fill=tk.X, pady=2)
         self._drill_alt_lbl.pack(fill=tk.X, pady=2)
@@ -993,6 +998,20 @@ class RepertoireGUI:
 
     def _drill_play_computer(self) -> None:
         """Pick the opponent move that steers toward the most overdue player position."""
+        if self._drill_replay_line is not None:
+            idx = len(self.history)
+            if idx < len(self._drill_replay_line):
+                move = self._drill_replay_line[idx]
+                if move in self.board.legal_moves:
+                    self._last_move_sqs = (move.from_square, move.to_square)
+                    self.history.append(move)
+                    self.board.push(move)
+                    self._draw_board()
+                    self._drill_update_notation()
+                    self._drill_load_node()
+                    return
+            self._drill_replay_line = None
+
         if self.current_node is None:
             self._drill_line_complete()
             return
@@ -1373,6 +1392,12 @@ class RepertoireGUI:
         self._drill_feedback_var.set(msg)
         self._drill_feedback_lbl.config(fg="#3a7abf")
         self._drill_progress_var.set(f"{correct} correct  •  {total} attempted")
+        self._last_completed_line = list(self.history)
+
+    def _drill_again(self) -> None:
+        replay = list(self._last_completed_line)
+        self._drill_new_game()
+        self._drill_replay_line = replay
 
     def _drill_toggle_stop(self) -> None:
         cur_fen = normalize_fen(self.board)
@@ -1625,16 +1650,64 @@ class RepertoireGUI:
             self._drill_filter_var.set("No opening filter active")
             self._drill_filter_lbl.config(fg="#888888")
 
+    def _openings_cache_file(self) -> Path:
+        return self.db_path.parent / "openings_cache.json"
+
+    def _load_disk_cache(self) -> tuple[dict | None, float]:
+        import json
+        try:
+            raw = json.loads(self._openings_cache_file().read_text())
+            stored_mtime = float(raw["db_mtime"])
+            result = {}
+            for color, (main_raw, alt_raw) in raw["data"].items():
+                result[color] = (
+                    [(n, tuple(lc)) for n, lc in main_raw],
+                    [(n, tuple(lc)) for n, lc in alt_raw],
+                )
+            return result, stored_mtime
+        except Exception:
+            return None, 0.0
+
+    def _save_disk_cache(self, result: dict, db_mtime: float) -> None:
+        import json
+        try:
+            payload = {
+                "db_mtime": db_mtime,
+                "data": {
+                    color: (
+                        [[n, list(lc)] for n, lc in main],
+                        [[n, list(lc)] for n, lc in alt],
+                    )
+                    for color, (main, alt) in result.items()
+                },
+            }
+            self._openings_cache_file().write_text(json.dumps(payload))
+        except Exception:
+            pass
+
     def _refresh_openings_split_cache(self) -> None:
-        """Recompute the openings split in a background thread and store in cache."""
         import threading
         db_path = self.db_path
+
+        try:
+            current_mtime = db_path.stat().st_mtime
+        except OSError:
+            current_mtime = 0.0
+
+        cached, stored_mtime = self._load_disk_cache()
+        if cached is not None and current_mtime == stored_mtime:
+            self._openings_split_cache = cached
+            return
+
+        if cached is not None:
+            self._openings_split_cache = cached
 
         def _run() -> None:
             result = {
                 color: get_openings_split(color, db_path)
                 for color in ("white", "black")
             }
+            self._save_disk_cache(result, current_mtime)
             self.root.after(0, lambda: setattr(self, "_openings_split_cache", result))
 
         threading.Thread(target=_run, daemon=True).start()
@@ -1708,7 +1781,7 @@ class RepertoireGUI:
                              fg="#1a4a8a", font=("Arial", 8, "italic"),
                              wraplength=380, justify="left").pack(
                                  padx=8, pady=(6, 2), anchor="w")
-                for name, count in openings:
+                for name, lc in openings:
                     var = tk.BooleanVar(value=(name in current))
                     check_vars[(color, name)] = var
                     if is_alt:
@@ -1719,8 +1792,21 @@ class RepertoireGUI:
                                         anchor="w", font=("Arial", 9),
                                         fg="#1a4a8a" if is_alt else "white")
                     cb.pack(side=tk.LEFT, fill=tk.X, expand=True)
-                    tk.Label(row, text=f"{count} move{'s' if count != 1 else ''}",
-                             fg="#888", font=("Arial", 8)).pack(side=tk.RIGHT, padx=4)
+                    counts_frame = tk.Frame(row)
+                    counts_frame.pack(side=tk.RIGHT, padx=4)
+                    _label_specs = [
+                        (lc[0], "#2a6e2a"),
+                        (lc[1], "#b07a10"),
+                        (lc[2], "#8b0000"),
+                        (lc[3], "#1a4a8a"),
+                        (lc[4], "#888888"),
+                    ]
+                    for i, (n, fg) in enumerate(_label_specs):
+                        tk.Label(counts_frame, text=str(n), fg=fg,
+                                 font=("Arial", 8)).pack(side=tk.LEFT)
+                        if i < 4:
+                            tk.Label(counts_frame, text="/", fg="#aaaaaa",
+                                     font=("Arial", 8)).pack(side=tk.LEFT)
 
         # Single Toplevel-level binding catches MouseWheel from every descendant widget
         # (Tk fires bindings in the widget's bindtag chain, which always includes the Toplevel).
