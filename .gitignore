@@ -7,6 +7,9 @@ data/games_raw/
 # Stockfish binary
 data/stockfish/
 
+# Openings Cache
+data/openings_cache.json
+
 # Python
 __pycache__/
 src/__pycache__/
